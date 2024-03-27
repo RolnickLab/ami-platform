@@ -1,3 +1,4 @@
+import logging
 import typing
 
 import requests
@@ -24,16 +25,68 @@ from ami.main.models import (
 from ..schemas import PipelineRequest, PipelineResponse, SourceImageRequest
 from .algorithm import Algorithm
 
+logger = logging.getLogger(__name__)
+
+
+def filter_processed_images(
+    images: typing.Iterable[SourceImage],
+    pipeline: "Pipeline",
+) -> typing.Iterable[SourceImage]:
+    """
+    Return only images that need to be processed by a given pipeline for the first time (have no detections)
+    or have detections that need to be classified by the given pipeline.
+    """
+    pipeline_algorithms = pipeline.algorithms.all()
+
+    for image in images:
+        existing_detections = image.detections.filter(detection_algorithm__in=pipeline_algorithms)
+        if not existing_detections.exists():
+            logger.info(f"Image {image} has no existing detections from pipeline {pipeline}")
+            # If there are no existing detections from this pipeline, send the image
+            yield image
+        elif not existing_detections.filter(classifications__isnull=True).exists():
+            # Check if there are detections with no classifications
+            logger.info(f"Image {image} has existing detections with no classifications from pipeline {pipeline}")
+            yield image
+        else:
+            # If there are existing detections with classifications,
+            # Compare their classification algorithms to the current pipeline's algorithms
+            detections_needing_classification = existing_detections.exclude(
+                classifications__algorithm__in=pipeline_algorithms
+            )
+            if detections_needing_classification.exists():
+                logger.info(
+                    f"Image {image} has existing detections that haven't been classified by the pipeline: {pipeline}"
+                )
+                logger.warn(
+                    f"Image {image} has existing detections that haven't been classified by the pipeline: {pipeline} "
+                    f"however we do yet have a mechanism to reclassify detections. Processing the image from scratch."
+                )
+                yield image
+            else:
+                # If all detections have been classified by the pipeline, skip the image
+                logger.info(f"Image {image} has existing detections classified by the pipeline: {pipeline}, skipping!")
+                continue
+
 
 def collect_images(
     collection: SourceImageCollection | None = None,
     source_images: list[SourceImage] | None = None,
     deployment: Deployment | None = None,
     job_id: int | None = None,
+    pipeline: "Pipeline | None" = None,
+    skip_processed: bool = True,
 ) -> typing.Iterable[SourceImage]:
     """
     Collect images from a collection, a list of images or a deployment.
     """
+    if job_id:
+        from ami.jobs.models import Job
+
+        job = Job.objects.get(pk=job_id)
+    else:
+        job = None
+
     # Set source to first argument that is not None
     if collection:
         images = collection.images.all()
@@ -44,11 +97,23 @@ def collect_images(
     else:
         raise ValueError("Must specify a collection, deployment or a list of images")
 
-    if job_id:
-        from ami.jobs.models import Job
+    total_images = len(images)
+    if pipeline and skip_processed:
+        msg = f"Filtering images that have already been processed by pipeline {pipeline}"
+        logger.info(msg)
+        if job:
+            job.logger.info(msg)
+        images = list(filter_processed_images(images, pipeline))
+    else:
+        msg = "NOT filtering images that have already been processed"
+        logger.info(msg)
+        if job:
+            job.logger.info(msg)
 
-        job = Job.objects.get(pk=job_id)
-        job.logger.info(f"Found {len(images)} images to process")
+    msg = f"Found {len(images)} out of {total_images} images to process"
+    logger.info(msg)
+    if job:
+        job.logger.info(msg)
 
     return images
 
@@ -112,6 +177,12 @@ def save_results(results: PipelineResponse, job_id: int | None = None) -> list[m
     created_objects = []
     job = None
 
+    pipeline, _created = Pipeline.objects.get_or_create(slug=results.pipeline, defaults={"name": results.pipeline})
+    if _created:
+        logger.warning(f"Pipeline choice returned by the ML backend was not recognized! {pipeline}")
+        created_objects.append(pipeline)
+    algorithms_used = set()
+
     if job_id:
         from ami.jobs.models import Job
 
@@ -134,15 +205,20 @@ def save_results(results: PipelineResponse, job_id: int | None = None) -> list[m
     for detection in results.detections:
         # @TODO use bulk create, or optimize this in some way
         print(detection)
-        assert detection.algorithm
-        algo, _created = Algorithm.objects.get_or_create(
+        assert detection.algorithm, "No detection algorithm was specified in the returned results."
+        detection_algo, _created = Algorithm.objects.get_or_create(
             name=detection.algorithm,
         )
+        algorithms_used.add(detection_algo)
+        if _created:
+            created_objects.append(detection_algo)
+
         # @TODO hmmmm what to do
         source_image = SourceImage.objects.get(pk=detection.source_image_id)
         source_images.add(source_image)
         existing_detection = Detection.objects.filter(
             source_image=source_image,
+            detection_algorithm=detection_algo,
             bbox=list(detection.bbox.dict().values()),
         ).first()
         if existing_detection:
@@ -157,9 +233,8 @@ def save_results(results: PipelineResponse, job_id: int | None = None) -> list[m
                 timestamp=source_image.timestamp,
                 path=detection.crop_image_url or "",
                 detection_time=detection.timestamp,
+                detection_algorithm=detection_algo,
             )
-            # @TODO lookup and assign related algorithm object
-            # new_detection.detection_algorithm = detection.algorithm
             new_detection.save()
             print("Created new detection", new_detection)
             created_objects.append(new_detection)
@@ -169,15 +244,16 @@ def save_results(results: PipelineResponse, job_id: int | None = None) -> list[m
         source_image = SourceImage.objects.get(pk=classification.source_image_id)
         source_images.add(source_image)
 
-        assert classification.algorithm
-        algo, _created = Algorithm.objects.get_or_create(
+        assert classification.algorithm, "No classification algorithm was specified in the returned results."
+        classification_algo, _created = Algorithm.objects.get_or_create(
             name=classification.algorithm,
         )
+        algorithms_used.add(classification_algo)
         if _created:
-            created_objects.append(algo)
+            created_objects.append(classification_algo)
 
         taxa_list, _created = TaxaList.objects.get_or_create(
-            name=f"Taxa returned by {algo.name}",
+            name=f"Taxa returned by {classification_algo.name}",
         )
         if _created:
             created_objects.append(taxa_list)
@@ -191,16 +267,25 @@ def save_results(results: PipelineResponse, job_id: int | None = None) -> list[m
 
         taxa_list.taxa.add(taxon)
 
-        detection = Detection.objects.filter(
-            source_image=source_image,
-            bbox=list(classification.bbox.dict().values()),
-        ).first()
+        # @TODO this is asking for trouble
+        # shouldn't we be able to get the detection from the classification?
+        # also should filter by the correct detection algorithm
+        # or do we use the bbox as a unique identifier?
+        # then it doesn't matter what detection algorithm was used
+        detection = (
+            Detection.objects.filter(
+                source_image=source_image,
+                bbox=list(classification.bbox.dict().values()),
+            )
+            .order_by("-timestamp")
+            .first()
+        )
         assert detection
 
         new_classification = Classification()
         new_classification.detection = detection
         new_classification.taxon = taxon
-        new_classification.algorithm = algo
+        new_classification.algorithm = classification_algo
         new_classification.score = max(classification.scores)
         new_classification.timestamp = now()  # @TODO get timestamp from API response
         # @TODO add reference to job or pipeline?
@@ -209,6 +294,7 @@ def save_results(results: PipelineResponse, job_id: int | None = None) -> list[m
         created_objects.append(new_classification)
 
         # Create a new occurrence for each detection (no tracking yet)
+        # @TODO remove when we implement tracking
         if not detection.occurrence:
             occurrence = Occurrence.objects.create(
                 event=source_image.event,
@@ -224,6 +310,14 @@ def save_results(results: PipelineResponse, job_id: int | None = None) -> list[m
     # Update precalculated counts on source images
     for source_image in source_images:
         source_image.save()
+
+    registered_algos = pipeline.algorithms.all()
+    for algo in algorithms_used:
+        # This is important for tracking what objects were processed by which algorithms
+        # to avoid reprocessing, and for tracking provenance.
+        if algo not in registered_algos:
+            pipeline.algorithms.add(algo)
+            logger.warning(f"Added unregistered algorithm {algo} to pipeline {pipeline}")
 
     if job:
         if len(created_objects):
@@ -245,6 +339,7 @@ class Pipeline(BaseModel):
     description = models.TextField(blank=True)
     version = models.IntegerField(default=1)
     version_name = models.CharField(max_length=255, blank=True)
+    # @TODO the algorithms list be retrieved by querying the pipeline endpoint
     algorithms = models.ManyToManyField(Algorithm, related_name="pipelines")
     stages: list[PipelineStage] = SchemaField(
         default=default_stages,
@@ -269,12 +364,15 @@ class Pipeline(BaseModel):
         source_images: list[SourceImage] | None = None,
         deployment: Deployment | None = None,
         job_id: int | None = None,
+        skip_processed: bool = True,
     ) -> typing.Iterable[SourceImage]:
         return collect_images(
             collection=collection,
             source_images=source_images,
             deployment=deployment,
             job_id=job_id,
+            pipeline=self,
+            skip_processed=skip_processed,
         )
 
     def process_images(self, images: typing.Iterable[SourceImage], job_id: int | None = None):
