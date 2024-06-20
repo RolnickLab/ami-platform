@@ -31,6 +31,9 @@ export enum STRING {
   START,
   SUBMIT,
   SUGGEST_ID,
+  SYNC,
+  TEST,
+  TEST_CONNECTION,
   VIEW_PUBLIC_PROJECTS,
 
   /* ENTITY */
@@ -53,6 +56,7 @@ export enum STRING {
   FIELD_LABEL_COMMENT,
   FIELD_LABEL_CONNECTION_STATUS,
   FIELD_LABEL_CREATED_AT,
+  FIELD_LABEL_DATA_SOURCE_CAPTURES,
   FIELD_LABEL_DATE,
   FIELD_LABEL_DELAY,
   FIELD_LABEL_DEPLOYMENT,
@@ -67,6 +71,7 @@ export enum STRING {
   FIELD_LABEL_ID,
   FIELD_LABEL_IMAGE,
   FIELD_LABEL_ICON,
+  FIELD_LABEL_LAST_SYNCED,
   FIELD_LABEL_LATITUDE,
   FIELD_LABEL_LOCATION,
   FIELD_LABEL_LOGS,
@@ -94,6 +99,8 @@ export enum STRING {
   FIELD_LABEL_THUMBNAIL,
   FIELD_LABEL_TIME,
   FIELD_LABEL_TIMESTAMP,
+  FIELD_LABEL_TOTAL_FILES,
+  FIELD_LABEL_TOTAL_SIZE,
   FIELD_LABEL_TRAINING_IMAGES,
   FIELD_LABEL_FIRST_DATE,
   FIELD_LABEL_LAST_DATE,
@@ -105,10 +112,12 @@ export enum STRING {
   /* MESSAGE */
   MESSAGE_CAPTURE_FILENAME,
   MESSAGE_CAPTURE_LIMIT,
+  MESSAGE_CAPTURE_SYNC_HIDDEN,
   MESSAGE_CAPTURE_TOO_MANY,
   MESSAGE_CAPTURE_UPLOAD_HIDDEN,
   MESSAGE_CHANGE_PASSWORD,
   MESSAGE_COULD_NOT_SAVE,
+  MESSAGE_DATA_SOURCE_NOT_CONFIGURED,
   MESSAGE_DELETE_CONFIRM,
   MESSAGE_HAS_ACCOUNT,
   MESSAGE_IMAGE_FORMAT,
@@ -173,6 +182,7 @@ export enum STRING {
   STAGES,
   SUMMARY,
   UNKNOWN,
+  UNKNOWN_ERROR,
   UPDATING_DATA,
   USER_INFO,
   VERIFIED_BY,
@@ -212,6 +222,9 @@ const ENGLISH_STRINGS: { [key in STRING]: string } = {
   [STRING.START]: 'Start',
   [STRING.SUBMIT]: 'Submit',
   [STRING.SUGGEST_ID]: 'Suggest ID',
+  [STRING.SYNC]: 'Sync',
+  [STRING.TEST]: 'Test',
+  [STRING.TEST_CONNECTION]: 'Test Connection',
   [STRING.VIEW_PUBLIC_PROJECTS]: 'View public projects',
 
   /* FIELD_LABEL */
@@ -221,9 +234,10 @@ const ENGLISH_STRINGS: { [key in STRING]: string } = {
   [STRING.FIELD_LABEL_COMMENT]: 'Comment',
   [STRING.FIELD_LABEL_CONNECTION_STATUS]: 'Connection status',
   [STRING.FIELD_LABEL_CREATED_AT]: 'Created at',
+  [STRING.FIELD_LABEL_DATA_SOURCE_CAPTURES]: 'Data source captures',
   [STRING.FIELD_LABEL_DATE]: 'Date',
   [STRING.FIELD_LABEL_DELAY]: 'Delay',
-  [STRING.FIELD_LABEL_DEVICE]: 'Device Type',
+  [STRING.FIELD_LABEL_DEVICE]: 'Device type',
   [STRING.FIELD_LABEL_DEPLOYMENT]: 'Deployment',
   [STRING.FIELD_LABEL_DESCRIPTION]: 'Description',
   [STRING.FIELD_LABEL_DETECTIONS]: 'Detections',
@@ -233,8 +247,9 @@ const ENGLISH_STRINGS: { [key in STRING]: string } = {
   [STRING.FIELD_LABEL_FINISHED_AT]: 'Finished at',
   [STRING.FIELD_LABEL_GENERAL]: 'General configuration',
   [STRING.FIELD_LABEL_ID]: 'ID',
-  [STRING.FIELD_LABEL_IMAGE]: 'Cover Image',
+  [STRING.FIELD_LABEL_IMAGE]: 'Cover image',
   [STRING.FIELD_LABEL_ICON]: 'Icon',
+  [STRING.FIELD_LABEL_LAST_SYNCED]: 'Last synced',
   [STRING.FIELD_LABEL_LATITUDE]: 'Latitude',
   [STRING.FIELD_LABEL_LOCATION]: 'Location',
   [STRING.FIELD_LABEL_LOGS]: 'Logs',
@@ -262,6 +277,8 @@ const ENGLISH_STRINGS: { [key in STRING]: string } = {
   [STRING.FIELD_LABEL_THUMBNAIL]: 'Thumbnail',
   [STRING.FIELD_LABEL_TIME]: 'Local time',
   [STRING.FIELD_LABEL_TIMESTAMP]: 'Timestamp',
+  [STRING.FIELD_LABEL_TOTAL_FILES]: 'Total files',
+  [STRING.FIELD_LABEL_TOTAL_SIZE]: 'Total size',
   [STRING.FIELD_LABEL_TRAINING_IMAGES]: 'Reference images',
   [STRING.FIELD_LABEL_FIRST_DATE]: 'First date',
   [STRING.FIELD_LABEL_LAST_DATE]: 'Last date',
@@ -288,13 +305,17 @@ const ENGLISH_STRINGS: { [key in STRING]: string } = {
     'Image filename must contain a timestamp in the format YYYYMMDDHHMMSS (e.g. 20210101120000-snapshot.jpg).',
   [STRING.MESSAGE_CAPTURE_LIMIT]:
     'A maximum of {{numCaptures}} example captures can be uploaded through the web browser. Configure a data source to upload data in bulk.',
+  [STRING.MESSAGE_CAPTURE_SYNC_HIDDEN]:
+    'Deployment must be created before syncing captures.',
   [STRING.MESSAGE_CAPTURE_TOO_MANY]:
     'To upload more than {{numCaptures}} images you must configure a data source.',
   [STRING.MESSAGE_CAPTURE_UPLOAD_HIDDEN]:
-    'Deployment must be saved before uploading captures.',
+    'Deployment must be created before uploading captures.',
   [STRING.MESSAGE_CHANGE_PASSWORD]:
     'Contact an administrator to change your email or password.',
   [STRING.MESSAGE_COULD_NOT_SAVE]: 'Could not save',
+  [STRING.MESSAGE_DATA_SOURCE_NOT_CONFIGURED]:
+    'A data source must be configured and saved before syncing captures.',
   [STRING.MESSAGE_DELETE_CONFIRM]:
     'Are you sure you want to delete this {{type}}?',
   [STRING.MESSAGE_HAS_ACCOUNT]: 'Already have an account?',
@@ -328,7 +349,7 @@ const ENGLISH_STRINGS: { [key in STRING]: string } = {
 
   /* TAB_ITEM */
   [STRING.TAB_ITEM_COLLECTIONS]: 'Collections',
-  [STRING.TAB_ITEM_DEVICES]: 'Device Types',
+  [STRING.TAB_ITEM_DEVICES]: 'Device types',
   [STRING.TAB_ITEM_FIELDS]: 'Fields',
   [STRING.TAB_ITEM_GALLERY]: 'Gallery',
   [STRING.TAB_ITEM_IDENTIFICATION]: 'Identification',
@@ -365,6 +386,7 @@ const ENGLISH_STRINGS: { [key in STRING]: string } = {
   [STRING.STAGES]: 'Stages',
   [STRING.SUMMARY]: 'Summary',
   [STRING.UNKNOWN]: 'Unknown',
+  [STRING.UNKNOWN_ERROR]: 'Unknown error',
   [STRING.UPDATING_DATA]: 'Updating data',
   [STRING.USER_INFO]: 'User info',
   [STRING.VERIFIED_BY]: 'Verified by\n{{name}}',

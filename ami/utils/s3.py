@@ -13,6 +13,9 @@ import botocore.config
 import botocore.exceptions
 import PIL
 import PIL.Image
+
+# @TODO don't use Django cache in utils if possible
+from django.core.cache import cache
 from mypy_boto3_s3.client import S3Client
 from mypy_boto3_s3.paginator import ListObjectsV2Paginator
 from mypy_boto3_s3.service_resource import Bucket, ObjectSummary, S3ServiceResource
@@ -29,7 +32,15 @@ class S3Config:
     secret_access_key: str
     bucket_name: str
     prefix: str
-    public_base_url: str = "/"
+    public_base_url: str | None = None
+
+    sensitive_fields = ["access_key_id", "secret_access_key"]
+
+    def safe_dict(self):
+        return {k: v for k, v in self.__dict__.items() if k not in self.sensitive_fields}
+
+    def safe_hash(self):
+        return "-".join(map(str, self.safe_dict().values()))
 
 
 def with_trailing_slash(s: str):
@@ -92,6 +103,42 @@ def get_resource(config: S3Config) -> S3ServiceResource:
         # api_version="s3v4",
     )
     return s3
+
+
+@dataclass
+class TestConnectionResponse:
+    success: bool
+    error_code: str | None = None
+    error_message: str | None = None
+
+
+def test_connection(config: S3Config) -> TestConnectionResponse:
+    """
+    Test connection to S3 bucket.
+
+    Returns a tuple of (success, error_message)
+
+    @TODO consider testing latency here.
+    """
+    client = get_client(config)
+    try:
+        client.list_objects_v2(
+            Bucket=config.bucket_name,
+            MaxKeys=1,
+            Prefix=config.prefix,
+        )
+    except botocore.exceptions.ClientError as e:
+        error_code = e.response.get("Error", {}).get("Code")
+        error_message = e.response.get("Error", {}).get("Message")
+        return TestConnectionResponse(False, error_code, error_message)
+    except botocore.exceptions.EndpointConnectionError as e:
+        return TestConnectionResponse(False, "EndpointConnectionError", str(e))
+    except botocore.exceptions.BotoCoreError as e:
+        return TestConnectionResponse(False, "BotoCoreError", str(e))
+    except Exception as e:
+        raise e
+    else:
+        return TestConnectionResponse(True)
 
 
 def list_buckets(config: S3Config) -> list[BucketTypeDef]:
@@ -220,7 +267,8 @@ def write_file(config: S3Config, key: str, body: bytes):
         # Use path join to ensure there are no extra or missing slashes
         key = pathlib.Path(config.prefix, key).as_posix()
     obj = bucket.Object(key)
-    return obj.put(Body=body)
+    obj.put(Body=body)
+    return obj
 
 
 def file_exists(config: S3Config, key: str) -> bool:
@@ -232,7 +280,7 @@ def file_exists(config: S3Config, key: str) -> bool:
     try:
         obj.load()
     except botocore.exceptions.ClientError as e:
-        if e.response["Error"]["Code"] == "404":
+        if e.response.get("Error", {}).get("Code") == "404":
             return False
         else:
             raise
@@ -261,7 +309,30 @@ def public_url(config: S3Config, key: str):
 
     @TODO Handle non-public buckets with signed URLs
     """
-    return urllib.parse.urljoin(config.public_base_url, key.lstrip("/"))
+    if not config.public_base_url:
+        return get_presigned_url(config, key)
+    else:
+        return urllib.parse.urljoin(config.public_base_url, key.lstrip("/"))
+
+
+def get_presigned_url(config: S3Config, key: str, expires_in: int = 60 * 60 * 24 * 7):
+    """
+    Generate a presigned URL for a given key.
+    """
+    cache_key = f"s3_presigned_url:{config.safe_hash()}:{key}"
+    url = cache.get(cache_key)
+    if not url:
+        logger.debug(f"Fetching new presigned URL for: {cache_key}")
+        client = get_client(config)
+        url = client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": config.bucket_name, "Key": key},
+            ExpiresIn=expires_in,
+        )
+        cache.set(cache_key, url, timeout=expires_in)
+    else:
+        logger.debug(f"Got cached presigned URL for: {cache_key}")
+    return url
 
 
 # Methods to resize all images under a prefix

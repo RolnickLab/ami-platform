@@ -1,3 +1,4 @@
+import { getFormatedDateTimeString } from 'utils/date/getFormatedDateTimeString/getFormatedDateTimeString'
 import { UserPermission } from 'utils/user/types'
 
 export type ServerDeployment = any // TODO: Update this type
@@ -65,5 +66,25 @@ export class Deployment {
 
   get lastDate(): number {
     return this._deployment.last_date
+  }
+
+  get dataSourceDetails(): {
+    lastChecked?: string
+    totalFiles?: number
+    totalSize?: number
+    totalSizeDisplay?: string
+    uri?: string
+  } {
+    return {
+      lastChecked: this._deployment.data_source_last_checked
+        ? getFormatedDateTimeString({
+            date: new Date(this._deployment.data_source_last_checked),
+          })
+        : undefined,
+      totalFiles: this._deployment.data_source_total_files,
+      totalSize: this._deployment.data_source_total_size,
+      totalSizeDisplay: this._deployment.data_source_total_size_display,
+      uri: this._deployment.data_source_uri,
+    }
   }
 }

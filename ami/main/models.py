@@ -17,6 +17,7 @@ from django.db.models import Q
 from django.db.models.fields.files import ImageFieldFile
 from django.db.models.signals import pre_delete
 from django.dispatch import receiver
+from django.template.defaultfilters import filesizeformat
 
 import ami.tasks
 import ami.utils
@@ -24,6 +25,9 @@ from ami.base.models import BaseModel
 from ami.main import charts
 from ami.users.models import User
 from ami.utils.schemas import OrderedEnum
+
+if typing.TYPE_CHECKING:
+    from ami.jobs.models import Job
 
 logger = logging.getLogger(__name__)
 
@@ -299,6 +303,7 @@ class Deployment(BaseModel):
     project = models.ForeignKey(Project, on_delete=models.SET_NULL, null=True, related_name="deployments")
 
     # @TODO consider sharing only the "data source auth/config" then a one-to-one config for each deployment
+    # Or a pydantic model with nested attributes about each data source relationship
     data_source = models.ForeignKey(
         "S3StorageSource", on_delete=models.SET_NULL, null=True, blank=True, related_name="deployments"
     )
@@ -390,7 +395,13 @@ class Deployment(BaseModel):
             uri = None
         return uri
 
-    def sync_captures(self, batch_size=1000, regroup_events_per_batch=False) -> int:
+    def data_source_total_size_display(self) -> str:
+        if self.data_source_total_size is None:
+            return filesizeformat(0)
+        else:
+            return filesizeformat(self.data_source_total_size)
+
+    def sync_captures(self, batch_size=1000, regroup_events_per_batch=False, job: "Job | None" = None) -> int:
         """Import images from the deployment's data source"""
 
         deployment = self
@@ -402,6 +413,11 @@ class Deployment(BaseModel):
         source_images = []
         django_batch_size = batch_size
         sql_batch_size = 1000
+
+        if job:
+            job.logger.info(f"Syncing captures for deployment {deployment}")
+            job.update_progress()
+            job.save()
 
         for obj in ami.utils.s3.list_files_paginated(
             s3_config,
@@ -419,17 +435,34 @@ class Deployment(BaseModel):
                     deployment, source_images, total_files, total_size, sql_batch_size, regroup_events_per_batch
                 )
                 source_images = []
+                if job:
+                    job.logger.info(f"Processed {total_files} files")
+                    job.progress.update_stage(job.job_type().key, total_files=total_files)
+                    job.update_progress()
 
         if source_images:
             # Insert/update the last batch
             _insert_or_update_batch_for_sync(
                 deployment, source_images, total_files, total_size, sql_batch_size, regroup_events_per_batch
             )
+        if job:
+            job.logger.info(f"Processed {total_files} files")
+            job.progress.update_stage(job.job_type().key, total_files=total_files)
+            job.update_progress()
 
         _compare_totals_for_sync(deployment, total_files)
 
         # @TODO decide if we should delete SourceImages that are no longer in the data source
+
+        if job:
+            job.logger.info("Saving and recalculating sessions for deployment")
+            job.progress.update_stage(job.job_type().key, progress=1)
+            job.progress.add_stage("save_and_regroup")
+            job.update_progress()
         self.save()
+        if job:
+            job.progress.update_stage("save_and_regroup", progress=1)
+            job.update_progress()
 
         return total_files
 
@@ -801,18 +834,21 @@ class S3StorageSource(BaseModel):
     access_key = models.TextField()
     secret_key = models.TextField()
     endpoint_url = models.CharField(max_length=255, blank=True, null=True)
-    public_base_url = models.CharField(max_length=255, blank=True)
+    public_base_url = models.CharField(max_length=255, blank=True, null=True)
     total_size = models.BigIntegerField(null=True, blank=True)
     total_files = models.BigIntegerField(null=True, blank=True)
     last_checked = models.DateTimeField(null=True, blank=True)
     # last_check_duration = models.DurationField(null=True, blank=True)
     # use_signed_urls = models.BooleanField(default=False)
     project = models.ForeignKey(Project, on_delete=models.SET_NULL, null=True, related_name="storage_sources")
+    use_presigned_urls = models.BooleanField(
+        default=True, help_text="Uncheck this option if your image URLs are public for faster loading."
+    )
 
     deployments: models.QuerySet["Deployment"]
 
     @property
-    def config(self):
+    def config(self) -> ami.utils.s3.S3Config:
         return ami.utils.s3.S3Config(
             bucket_name=self.bucket,
             prefix=self.prefix,
@@ -821,6 +857,22 @@ class S3StorageSource(BaseModel):
             endpoint_url=self.endpoint_url,
             public_base_url=self.public_base_url,
         )
+
+    def deployments_count(self) -> int:
+        return self.deployments.count()
+
+    def total_files_indexed(self) -> int:
+        return self.deployments.aggregate(total_files=models.Sum("data_source_total_files"))["total_files"]
+
+    @functools.cache
+    def total_size_indexed(self) -> int:
+        return self.deployments.aggregate(total_size=models.Sum("data_source_total_size"))["total_size"]
+
+    def total_size_indexed_display(self) -> str:
+        return filesizeformat(self.total_size_indexed())
+
+    def total_captures_indexed(self) -> int:
+        return self.deployments.aggregate(total_captures=models.Sum("captures_count"))["total_captures"]
 
     def list_files(self, limit=None):
         """Recursively list files in the bucket/prefix."""
@@ -856,6 +908,11 @@ class S3StorageSource(BaseModel):
         """Return the public URL for the given path."""
 
         return ami.utils.s3.public_url(self.config, path)
+
+    def test_connection(self):
+        """Test the connection to the S3 bucket."""
+
+        return ami.utils.s3.test_connection(self.config)
 
     def save(self, *args, **kwargs):
         # If public_base_url has changed, update the urls for all source images
@@ -982,11 +1039,20 @@ class SourceImage(BaseModel):
         on the source image. If the deployment's data source changes, the URLs
         for all source images will be updated.
 
-        @TODO use signed URLs if necessary.
         @TODO add support for thumbnail URLs here?
         @TODO consider if we ever need to access the original image directly!
         """
-        return urllib.parse.urljoin(self.public_base_url or "/", self.path.lstrip("/"))
+        # Get presigned URL if access keys are configured
+        data_source = self.deployment.data_source if self.deployment and self.deployment.data_source else None
+        if (
+            data_source is not None
+            and data_source.use_presigned_urls
+            and data_source.access_key
+            and data_source.secret_key
+        ):
+            return ami.utils.s3.get_presigned_url(self.deployment.data_source.config, key=self.path)
+        else:
+            return urllib.parse.urljoin(self.public_base_url or "/", self.path.lstrip("/"))
 
     # backwards compatibility
     url = public_url

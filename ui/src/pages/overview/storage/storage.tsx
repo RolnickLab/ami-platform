@@ -1,29 +1,24 @@
 import { FetchInfo } from 'components/fetch-info/fetch-info'
-import { useEntities } from 'data-services/hooks/entities/useEntities'
+import { API_ROUTES } from 'data-services/constants'
+import { useStorageSources } from 'data-services/hooks/storage-sources/useStorageSources'
 import { PaginationBar } from 'design-system/components/pagination-bar/pagination-bar'
 import { Table } from 'design-system/components/table/table/table'
 import { TableSortSettings } from 'design-system/components/table/types'
 import { Error } from 'pages/error/error'
+import { NewEntityDialog } from 'pages/overview/entities/new-entity-dialog'
 import { useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { usePagination } from 'utils/usePagination'
 import { UserPermission } from 'utils/user/types'
-import { columns } from './entities-columns'
-import { NewEntityDialog } from './new-entity-dialog'
-import styles from './styles.module.scss'
+import { columns } from './storage-columns'
+import styles from './storage.module.scss'
 
-export const Entities = ({
-  collection,
-  type,
-}: {
-  collection: string
-  type: string
-}) => {
+export const StorageSources = () => {
   const { projectId } = useParams()
   const [sort, setSort] = useState<TableSortSettings>()
   const { pagination, setPage } = usePagination()
-  const { entities, userPermissions, total, isLoading, isFetching, error } =
-    useEntities(collection, {
+  const { items, userPermissions, total, isLoading, isFetching, error } =
+    useStorageSources({
       projectId,
       pagination,
       sort,
@@ -42,14 +37,14 @@ export const Entities = ({
         </div>
       )}
       <Table
-        items={entities}
+        items={items}
         isLoading={isLoading}
-        columns={columns(collection, type)}
+        columns={columns(projectId as string)}
         sortable
         sortSettings={sort}
         onSortSettingsChange={setSort}
       />
-      {entities?.length ? (
+      {items?.length ? (
         <PaginationBar
           pagination={pagination}
           total={total}
@@ -57,7 +52,7 @@ export const Entities = ({
         />
       ) : null}
       {canCreate && (
-        <NewEntityDialog collection={collection} type={type} isCompact />
+        <NewEntityDialog collection={API_ROUTES.STORAGE} type="storage" />
       )}
     </>
   )

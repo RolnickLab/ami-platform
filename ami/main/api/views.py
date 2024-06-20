@@ -151,6 +151,30 @@ class DeploymentViewSet(DefaultViewSet):
         else:
             return DeploymentSerializer
 
+    @action(detail=True, methods=["post"], name="sync")
+    def sync(self, _request, pk=None) -> Response:
+        """
+        Queue a task to sync data from the deployment's data source.
+        """
+        deployment: Deployment = self.get_object()
+        if deployment and deployment.data_source:
+            # queued_task = tasks.sync_source_images.delay(deployment.pk)
+            from ami.jobs.models import DataStorageSyncJob, Job
+
+            job = Job.objects.create(
+                name=f"Sync captures for deployment {deployment.pk}",
+                deployment=deployment,
+                project=deployment.project,
+            )
+            job.progress.add_stage(DataStorageSyncJob.key)
+            job.enqueue()
+            msg = f"Syncing captures for deployment {deployment.pk} from {deployment.data_source_uri} in background."
+            logger.info(msg)
+            assert deployment.project
+            return Response({"job_id": job.pk, "project_id": deployment.project.pk})
+        else:
+            raise api_exceptions.ValidationError(detail="Deployment must have a data source to sync captures from")
+
 
 class EventViewSet(DefaultViewSet):
     """
@@ -877,6 +901,12 @@ class DeviceViewSet(DefaultViewSet):
     ]
 
 
+class StorageSourceConnectionException(api_exceptions.APIException):
+    status_code = 400
+    default_detail = "Failed to connect to the storage source."
+    default_code = "storage_source_connection_error"
+
+
 class StorageSourceViewSet(DefaultViewSet):
     """
     API endpoint that allows storage sources to be viewed or edited.
@@ -890,3 +920,19 @@ class StorageSourceViewSet(DefaultViewSet):
         "updated_at",
         "name",
     ]
+
+    @action(detail=True, methods=["post"], name="test")
+    def test(self, _request, pk=None) -> Response:
+        """
+        Test the connection to the storage source.
+        """
+        storage_source: S3StorageSource = self.get_object()
+        if storage_source:
+            result = storage_source.test_connection()
+            # result is a TestConnectionResult object
+            if result.success:
+                return Response(status=200)
+            else:
+                raise StorageSourceConnectionException(detail=result.error_message, code=result.error_code)
+        else:
+            raise api_exceptions.ValidationError(detail="Storage source not found")

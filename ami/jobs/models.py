@@ -3,6 +3,7 @@ import logging
 import random
 import time
 import typing
+from dataclasses import dataclass
 
 import pydantic
 from django.db import models
@@ -249,6 +250,212 @@ class JobLogHandler(logging.Handler):
         self.job.save()
 
 
+@dataclass
+class JobType:
+    name: str
+    key: str
+
+    @classmethod
+    def run(cls, job: "Job"):
+        """
+        Execute the run function specific to this job type.
+        """
+        pass
+
+
+AnyJobType = typing.TypeVar("AnyJobType", bound=JobType)
+
+
+class MLJob(JobType):
+    name = "ML Pipeline"
+    key = "ml"
+
+    @classmethod
+    def run(cls, job: "Job"):
+        """
+        Procedure for an ML pipeline as a job.
+        """
+        job.update_status(JobState.STARTED)
+        job.started_at = datetime.datetime.now()
+        job.finished_at = None
+        job.save()
+
+        if job.delay:
+            update_interval_seconds = 2
+            last_update = time.time()
+            for i in range(job.delay):
+                time.sleep(1)
+                # Update periodically
+                if time.time() - last_update > update_interval_seconds:
+                    job.logger.info(f"Delaying job {job.pk} for the {i} out of {job.delay} seconds")
+                    job.progress.update_stage(
+                        "delay",
+                        status=JobState.STARTED,
+                        progress=i / job.delay,
+                        mood="😵‍💫",
+                    )
+                    job.save()
+                    last_update = time.time()
+
+            job.progress.update_stage(
+                "delay",
+                status=JobState.SUCCESS,
+                progress=1,
+                mood="🥳",
+            )
+            job.save()
+
+        if job.pipeline:
+            job.progress.update_stage(
+                "collect",
+                status=JobState.STARTED,
+                progress=0,
+            )
+
+            images = list(
+                # @TODO return generator plus image count
+                # @TODO pass to celery group chain?
+                job.pipeline.collect_images(
+                    collection=job.source_image_collection,
+                    deployment=job.deployment,
+                    source_images=[job.source_image_single] if job.source_image_single else None,
+                    job_id=job.pk,
+                    skip_processed=True,
+                    # shuffle=job.shuffle,
+                )
+            )
+            source_image_count = len(images)
+            job.progress.update_stage("collect", total_images=source_image_count)
+
+            if job.shuffle and source_image_count > 1:
+                job.logger.info("Shuffling images")
+                random.shuffle(images)
+
+            # @TODO remove this temporary limit
+            TEMPORARY_LIMIT = 1000
+            job.limit = job.limit or TEMPORARY_LIMIT
+
+            if job.limit and source_image_count > job.limit:
+                job.logger.warn(f"Limiting number of images to {job.limit} (out of {source_image_count})")
+                images = images[: job.limit]
+                image_count = len(images)
+                job.progress.add_stage_param("collect", "Limit", image_count)
+            else:
+                image_count = source_image_count
+
+            job.progress.update_stage(
+                "collect",
+                status=JobState.SUCCESS,
+                progress=1,
+            )
+
+            total_detections = 0
+            total_classifications = 0
+
+            CHUNK_SIZE = 4  # Keep it low to see more progress updates
+            chunks = [images[i : i + CHUNK_SIZE] for i in range(0, image_count, CHUNK_SIZE)]  # noqa
+
+            for i, chunk in enumerate(chunks):
+                try:
+                    results = job.pipeline.process_images(
+                        images=chunk,
+                        job_id=job.pk,
+                    )
+                except Exception as e:
+                    # Log error about image batch and continue
+                    job.logger.error(f"Failed to process image batch {i} of {len(chunks)}: {e}")
+                    continue
+
+                total_detections += len(results.detections)
+                total_classifications += len([c for d in results.detections for c in d.classifications])
+                job.progress.update_stage(
+                    "process",
+                    status=JobState.STARTED,
+                    progress=(i + 1) / len(chunks),
+                    processed=(i + 1) * CHUNK_SIZE,
+                    remaining=image_count - (i + 1) * CHUNK_SIZE,
+                    detections=total_detections,
+                    classifications=total_classifications,
+                )
+                job.save()
+                objects = job.pipeline.save_results(results=results, job_id=job.pk)
+                job.progress.update_stage(
+                    "results",
+                    status=JobState.STARTED,
+                    progress=(i + 1) / len(chunks),
+                    objects_created=len(objects),
+                )
+                job.update_progress()
+                job.save()
+
+            job.progress.update_stage(
+                "process",
+                status=JobState.SUCCESS,
+            )
+            job.progress.update_stage(
+                "results",
+                status=JobState.SUCCESS,
+            )
+
+        job.update_status(JobState.SUCCESS)
+        job.update_progress()
+        job.finished_at = datetime.datetime.now()
+        job.save()
+
+
+class DataStorageSyncJob(JobType):
+    name = "Data Storage Sync"
+    key = "data_storage_sync"
+
+    @classmethod
+    def setup(cls, job: "Job", save=True):
+        job.progress = job.progress or default_job_progress
+        job.progress.add_stage_param(cls.key, "Total Images", "")
+
+        if save:
+            job.save()
+
+    @classmethod
+    def run(cls, job: "Job"):
+        """
+        Run the data storage sync job.
+
+        This is meant to be called by an async task, not directly.
+        """
+
+        job.update_status(JobState.STARTED)
+        job.started_at = datetime.datetime.now()
+        job.finished_at = None
+        job.save()
+
+        if job.deployment:
+            job.logger.info(f"Syncing captures for deployment {job.deployment}")
+            job.progress.update_stage(
+                cls.key,
+                status=JobState.STARTED,
+                progress=0,
+                total_images=0,
+            )
+            job.save()
+
+            job.deployment.sync_captures(job=job)
+
+            job.logger.info(f"Finished syncing captures for deployment {job.deployment}")
+            job.progress.update_stage(
+                cls.key,
+                status=JobState.SUCCESS,
+                progress=1,
+            )
+            job.update_status(JobState.SUCCESS)
+            job.save()
+        else:
+            job.update_status(JobState.FAILURE)
+
+        job.update_progress()
+        job.finished_at = datetime.datetime.now()
+        job.save()
+
+
 class Job(BaseModel):
     """A job to be run by the scheduler"""
 
@@ -267,7 +474,7 @@ class Job(BaseModel):
     task_id = models.CharField(max_length=255, null=True, blank=True)
     delay = models.IntegerField("Delay in seconds", default=0, help_text="Delay before running the job")
     limit = models.IntegerField(
-        "Limit", null=True, blank=True, default=100, help_text="Limit the number of images to process"
+        "Limit", null=True, blank=True, default=1000, help_text="Limit the number of images to process"
     )
     shuffle = models.BooleanField("Shuffle", default=True, help_text="Process images in a random order")
 
@@ -307,6 +514,22 @@ class Job(BaseModel):
 
     def __str__(self) -> str:
         return f'#{self.pk} "{self.name}" ({self.status})'
+
+    def job_type(self) -> type[JobType]:
+        """
+        This is a temporary way to determine the type of job.
+        @TODO rework Job classes and background tasks.
+        """
+        try:
+            self.progress.get_stage(DataStorageSyncJob.key)
+            return DataStorageSyncJob
+        except ValueError:
+            pass
+
+        if self.pipeline:
+            return MLJob
+
+        raise ValueError("Could not determine job type")
 
     def enqueue(self):
         """
@@ -355,133 +578,9 @@ class Job(BaseModel):
 
         This is meant to be called by an async task, not directly.
         """
-
-        self.update_status(JobState.STARTED)
-        self.started_at = datetime.datetime.now()
-        self.finished_at = None
-        self.save()
-
-        if self.delay:
-            update_interval_seconds = 2
-            last_update = time.time()
-            for i in range(self.delay):
-                time.sleep(1)
-                # Update periodically
-                if time.time() - last_update > update_interval_seconds:
-                    self.logger.info(f"Delaying job {self.pk} for the {i} out of {self.delay} seconds")
-                    self.progress.update_stage(
-                        "delay",
-                        status=JobState.STARTED,
-                        progress=i / self.delay,
-                        mood="😵‍💫",
-                    )
-                    self.save()
-                    last_update = time.time()
-
-            self.progress.update_stage(
-                "delay",
-                status=JobState.SUCCESS,
-                progress=1,
-                mood="🥳",
-            )
-            self.save()
-
-        if self.pipeline:
-            self.progress.update_stage(
-                "collect",
-                status=JobState.STARTED,
-                progress=0,
-            )
-
-            images = list(
-                # @TODO return generator plus image count
-                # @TODO pass to celery group chain?
-                self.pipeline.collect_images(
-                    collection=self.source_image_collection,
-                    deployment=self.deployment,
-                    source_images=[self.source_image_single] if self.source_image_single else None,
-                    job_id=self.pk,
-                    skip_processed=True,
-                    # shuffle=self.shuffle,
-                )
-            )
-            source_image_count = len(images)
-            self.progress.update_stage("collect", total_images=source_image_count)
-
-            if self.shuffle and source_image_count > 1:
-                self.logger.info("Shuffling images")
-                random.shuffle(images)
-
-            # @TODO remove this temporary limit
-            TEMPORARY_LIMIT = 200
-            self.limit = self.limit or TEMPORARY_LIMIT
-
-            if self.limit and source_image_count > self.limit:
-                self.logger.warn(f"Limiting number of images to {self.limit} (out of {source_image_count})")
-                images = images[: self.limit]
-                image_count = len(images)
-                self.progress.add_stage_param("collect", "Limit", image_count)
-            else:
-                image_count = source_image_count
-
-            self.progress.update_stage(
-                "collect",
-                status=JobState.SUCCESS,
-                progress=1,
-            )
-
-            total_detections = 0
-            total_classifications = 0
-
-            CHUNK_SIZE = 4  # Keep it low to see more progress updates
-            chunks = [images[i : i + CHUNK_SIZE] for i in range(0, image_count, CHUNK_SIZE)]  # noqa
-
-            for i, chunk in enumerate(chunks):
-                try:
-                    results = self.pipeline.process_images(
-                        images=chunk,
-                        job_id=self.pk,
-                    )
-                except Exception as e:
-                    # Log error about image batch and continue
-                    self.logger.error(f"Failed to process image batch {i} of {len(chunks)}: {e}")
-                    continue
-
-                total_detections += len(results.detections)
-                total_classifications += len([c for d in results.detections for c in d.classifications])
-                self.progress.update_stage(
-                    "process",
-                    status=JobState.STARTED,
-                    progress=(i + 1) / len(chunks),
-                    processed=(i + 1) * CHUNK_SIZE,
-                    remaining=image_count - (i + 1) * CHUNK_SIZE,
-                    detections=total_detections,
-                    classifications=total_classifications,
-                )
-                self.save()
-                objects = self.pipeline.save_results(results=results, job_id=self.pk)
-                self.progress.update_stage(
-                    "results",
-                    status=JobState.STARTED,
-                    progress=(i + 1) / len(chunks),
-                    objects_created=len(objects),
-                )
-                self.update_progress()
-                self.save()
-
-            self.progress.update_stage(
-                "process",
-                status=JobState.SUCCESS,
-            )
-            self.progress.update_stage(
-                "results",
-                status=JobState.SUCCESS,
-            )
-
-        self.update_status(JobState.SUCCESS)
-        self.update_progress()
-        self.finished_at = datetime.datetime.now()
-        self.save()
+        job_type = self.job_type()
+        job_type.run(job=self)
+        return None
 
     def cancel(self):
         """
