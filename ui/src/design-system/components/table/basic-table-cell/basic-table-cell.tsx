@@ -26,10 +26,11 @@ export const BasicTableCell = ({
     <div
       className={classNames(styles.tableCell, {
         [styles.primary]: theme === CellTheme.Primary,
+        [styles.bubble]: theme === CellTheme.Bubble,
       })}
       style={{ textAlign, ...style }}
     >
-      {label && <span className={styles.label}>{label}</span>}
+      {label ? <span className={styles.label}>{label}</span> : null}
       {details &&
         details.map((detail, index) => (
           <span key={index} className={styles.details}>
