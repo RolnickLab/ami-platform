@@ -250,7 +250,7 @@ const ENGLISH_STRINGS: { [key in STRING]: string } = {
 
   /* FIELD_LABEL */
   [STRING.FIELD_LABEL_AVG_TEMP]: 'Avg temp',
-  [STRING.FIELD_LABEL_BEST_SCORE]: 'Best score',
+  [STRING.FIELD_LABEL_BEST_SCORE]: 'Best Score',
   [STRING.FIELD_LABEL_CAPTURES]: 'Captures',
   [STRING.FIELD_LABEL_COMMENT]: 'Comment',
   [STRING.FIELD_LABEL_CONNECTION_STATUS]: 'Connection status',
