@@ -1,0 +1,204 @@
+import { STRING, translate } from 'utils/language'
+
+export type MergeRelation = 'before' | 'after' | 'gap'
+
+export interface ServerMergeCandidate {
+  id: number
+  determination: { id: number; name: string } | null
+  detections_count: number
+  first_appearance_timestamp: string | null
+  last_appearance_timestamp: string | null
+  relation: MergeRelation
+  time_offset_seconds: number
+  distance: number | null
+  similarity: number | null
+  cost: number | null
+  image: string | null
+  capture_id: number | null
+  image_timestamp: string | null
+  edge_image: string | null
+  edge_timestamp: string | null
+}
+
+/** An occurrence that could be merged with another, scored against it by the tracking method. */
+export interface MergeCandidate {
+  id: string
+  displayName: string
+  images: { src: string }[]
+  numDetections: number
+  relation: MergeRelation
+  /** Negative when the candidate ends first, positive when it starts later, 0 in a gap of the track. */
+  timeOffsetSeconds: number
+  /** Centre-to-centre gap of the two nearest frames as a fraction of the frame; null without a box. */
+  distance: number | null
+  /** Cosine similarity of the two nearest frames; null when either has no feature vector. */
+  similarity: number | null
+  cost: number | null
+  /** The capture holding the candidate's nearest frame, the one its crop is cut from. */
+  captureId: string | null
+  imageTimestamp: Date | null
+  /** Crop of this occurrence's own frame in the scored pair: its first frame for a "before" candidate, its last for an "after" one. */
+  edgeImage: string | null
+  edgeTimestamp: Date | null
+}
+
+const toDate = (timestamp: string | null | undefined): Date | null =>
+  timestamp ? new Date(timestamp) : null
+
+export const convertMergeCandidate = (
+  candidate: ServerMergeCandidate
+): MergeCandidate => ({
+  id: `${candidate.id}`,
+  displayName: candidate.determination
+    ? `${candidate.determination.name} #${candidate.id}`
+    : `#${candidate.id}`,
+  images: candidate.image ? [{ src: candidate.image }] : [],
+  numDetections: candidate.detections_count,
+  relation: candidate.relation,
+  timeOffsetSeconds: candidate.time_offset_seconds,
+  distance: candidate.distance,
+  similarity: candidate.similarity,
+  cost: candidate.cost,
+  captureId: candidate.capture_id != null ? `${candidate.capture_id}` : null,
+  imageTimestamp: toDate(candidate.image_timestamp),
+  edgeImage: candidate.edge_image ?? null,
+  edgeTimestamp: toDate(candidate.edge_timestamp),
+})
+
+export const getOffsetLabel = (seconds: number): string => {
+  const total = Math.round(Math.abs(seconds))
+
+  if (total < 60) {
+    return translate(STRING.TRACK_OFFSET_SECONDS, { count: total })
+  }
+
+  const minutes = Math.round(total / 60)
+
+  if (minutes < 60) {
+    return translate(STRING.TRACK_OFFSET_MINUTES, { count: minutes })
+  }
+
+  return translate(STRING.TRACK_OFFSET_HOURS, {
+    hours: Math.floor(minutes / 60),
+    minutes: minutes % 60,
+  })
+}
+
+export const getWhenLabel = (timeOffsetSeconds: number): string =>
+  translate(
+    timeOffsetSeconds < 0 ? STRING.TRACK_WHEN_EARLIER : STRING.TRACK_WHEN_LATER,
+    { time: getOffsetLabel(timeOffsetSeconds) }
+  )
+
+export interface ComparisonSide {
+  src: string | null
+  timestamp: Date | null
+}
+
+/** The two crops of a scored pair in time order, with the gap between them as a signed label. */
+export interface ComparisonSides {
+  left: ComparisonSide
+  right: ComparisonSide
+  gapLabel: string
+}
+
+/**
+ * Seconds from the track frame a candidate is scored against to the candidate's own
+ * frame: negative when the candidate is earlier. A gap candidate is measured from the
+ * nearest track frame, which can lie on either side of it.
+ */
+export const getWhenOffsetSeconds = (
+  candidate: Pick<
+    MergeCandidate,
+    'relation' | 'timeOffsetSeconds' | 'imageTimestamp' | 'edgeTimestamp'
+  >
+): number =>
+  candidate.relation === 'gap' &&
+  candidate.imageTimestamp &&
+  candidate.edgeTimestamp
+    ? (candidate.imageTimestamp.getTime() - candidate.edgeTimestamp.getTime()) /
+      1000
+    : candidate.timeOffsetSeconds
+
+export const getComparisonSides = (
+  candidate: MergeCandidate
+): ComparisonSides => {
+  const candidateSide: ComparisonSide = {
+    src: candidate.images[0]?.src ?? null,
+    timestamp: candidate.imageTimestamp,
+  }
+  const edgeSide: ComparisonSide = {
+    src: candidate.edgeImage,
+    timestamp: candidate.edgeTimestamp,
+  }
+
+  const offsetSeconds = getWhenOffsetSeconds(candidate)
+  const time = getOffsetLabel(offsetSeconds)
+
+  return offsetSeconds < 0
+    ? {
+        left: candidateSide,
+        right: edgeSide,
+        gapLabel: translate(STRING.TRACK_GAP_BEFORE, { time }),
+      }
+    : {
+        left: edgeSide,
+        right: candidateSide,
+        gapLabel: translate(STRING.TRACK_GAP_AFTER, { time }),
+      }
+}
+
+export const getDistanceLabel = (distance: number | null): string =>
+  distance === null
+    ? translate(STRING.VALUE_NOT_AVAILABLE)
+    : translate(STRING.TRACK_PERCENT, { percent: (distance * 100).toFixed(1) })
+
+export const getSimilarityLabel = (similarity: number | null): string =>
+  similarity === null
+    ? translate(STRING.VALUE_NOT_AVAILABLE)
+    : translate(STRING.TRACK_PERCENT, {
+        percent: `${Math.round(similarity * 100)}`,
+      })
+
+export type MergeCandidateSortColumn = 'when' | 'distance' | 'similarity'
+
+export interface MergeCandidateSort {
+  column: MergeCandidateSortColumn
+  descending: boolean
+}
+
+const sortValue = (
+  candidate: MergeCandidate,
+  column: MergeCandidateSortColumn
+): number | null =>
+  column === 'when'
+    ? getWhenOffsetSeconds(candidate)
+    : column === 'distance'
+    ? candidate.distance
+    : candidate.similarity
+
+/**
+ * Reorder loaded candidates for one column, keeping the server's cost order when
+ * no sort is chosen. Rows without a value for the column go last either way.
+ */
+export const sortMergeCandidates = (
+  candidates: MergeCandidate[],
+  sort?: MergeCandidateSort
+): MergeCandidate[] => {
+  if (!sort) {
+    return candidates
+  }
+
+  const direction = sort.descending ? -1 : 1
+
+  return [...candidates].sort((a, b) => {
+    const valueA = sortValue(a, sort.column)
+    const valueB = sortValue(b, sort.column)
+
+    if (valueA === null || valueB === null) {
+      return valueA === valueB ? 0 : valueA === null ? 1 : -1
+    }
+
+    return (valueA - valueB) * direction
+  })
+}

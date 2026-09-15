@@ -1,3 +1,4 @@
+import { CaptureDetails } from 'data-services/models/capture-details'
 import { TimelineTick } from 'data-services/models/timeline-tick'
 
 export const findClosestCaptureId = ({
@@ -45,6 +46,63 @@ export const findClosestCaptureId = ({
 
   return closestCaptureId
 }
+
+const findNextCaptureWithDetections = ({
+  date,
+  timeline,
+}: {
+  date: Date
+  timeline: TimelineTick[]
+}) =>
+  findClosestCaptureId({
+    minDate: date,
+    snapToDetections: true,
+    targetDate: date,
+    timeline,
+  })
+
+const findPrevCaptureWithDetections = ({
+  date,
+  timeline,
+}: {
+  date: Date
+  timeline: TimelineTick[]
+}) =>
+  findClosestCaptureId({
+    maxDate: date,
+    snapToDetections: true,
+    targetDate: date,
+    timeline,
+  })
+
+type CaptureNeighbours = Pick<
+  CaptureDetails,
+  'date' | 'nextCaptureWithDetectionsId' | 'prevCaptureWithDetectionsId'
+>
+
+// The server sees every capture; the timeline keeps one per minute, so it only
+// stands in when the capture was fetched without the server's answer.
+export const getNextCaptureWithDetectionsId = ({
+  capture,
+  timeline,
+}: {
+  capture: CaptureNeighbours
+  timeline: TimelineTick[]
+}) =>
+  capture.nextCaptureWithDetectionsId === undefined
+    ? findNextCaptureWithDetections({ date: capture.date, timeline })
+    : capture.nextCaptureWithDetectionsId ?? undefined
+
+export const getPrevCaptureWithDetectionsId = ({
+  capture,
+  timeline,
+}: {
+  capture: CaptureNeighbours
+  timeline: TimelineTick[]
+}) =>
+  capture.prevCaptureWithDetectionsId === undefined
+    ? findPrevCaptureWithDetections({ date: capture.date, timeline })
+    : capture.prevCaptureWithDetectionsId ?? undefined
 
 export const dateToValue = ({
   date,

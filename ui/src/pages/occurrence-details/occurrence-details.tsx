@@ -3,7 +3,10 @@ import {
   BlueprintItem,
 } from 'components/blueprint-collection/blueprint-collection'
 import { TaxonDetails } from 'components/taxon-details/taxon-details'
-import { OccurrenceDetails as Occurrence } from 'data-services/models/occurrence-details'
+import {
+  FrameLabel,
+  OccurrenceDetails as Occurrence,
+} from 'data-services/models/occurrence-details'
 import { SearchIcon } from 'lucide-react'
 import {
   BasicTooltip,
@@ -26,11 +29,18 @@ import { useUser } from 'utils/user/userContext'
 import { useUserInfo } from 'utils/user/userInfoContext'
 import { Agree } from './agree/agree'
 import { IdQuickActions } from './id-quick-actions/id-quick-actions'
+import { GroupingConfirmation } from './identification-card/grouping-confirmation'
+import { GroupingSummary } from './identification-card/grouping-summary'
 import { HumanIdentification } from './identification-card/human-identification'
 import { MachinePrediction } from './identification-card/machine-prediction'
 import styles from './occurrence-details.module.scss'
 import { StatusLabel } from './status-label/status-label'
 import { SuggestId } from './suggest-id/suggest-id'
+import { FrameActionDialogs } from './track/frame-action-dialogs'
+import { FrameCaption } from './track/frame-caption'
+import { FrameMenu } from './track/frame-menu'
+import { GroupingActions } from './track/grouping-actions'
+import { PendingFrameAction } from './track/types'
 
 export const TABS = {
   FIELDS: 'fields',
@@ -40,10 +50,13 @@ export const TABS = {
 
 export const OccurrenceDetails = ({
   occurrence,
+  onNavigate,
   selectedTab,
   setSelectedTab,
 }: {
   occurrence: Occurrence
+  /** Called when a frame's link is followed, so a dialog around these details can close. */
+  onNavigate?: () => void
   selectedTab?: string
   setSelectedTab: (selectedTab?: string) => void
 }) => {
@@ -52,12 +65,27 @@ export const OccurrenceDetails = ({
     user: { loggedIn },
   } = useUser()
   const { userInfo } = useUserInfo()
-  const { pathname } = useLocation()
+  const { pathname, search } = useLocation()
   const { projectId } = useParams()
   const navigate = useNavigate()
   const location = useLocation()
   const [suggestIdOpen, setSuggestIdOpen] = useState(false)
+  const [pendingFrameAction, setPendingFrameAction] =
+    useState<PendingFrameAction>()
   const canUpdate = occurrence.userPermissions.includes(UserPermission.Update)
+  // Restructuring a grouping is gated on the occurrence delete right, confirming one
+  // on either right — the same split the API makes. See #1272.
+  const canRestructure = occurrence.userPermissions.includes(
+    UserPermission.Delete
+  )
+  const canVerifyGrouping = canUpdate || canRestructure
+
+  const sessionRoute = occurrence.sessionId
+    ? APP_ROUTES.SESSION_DETAILS({
+        projectId: projectId as string,
+        sessionId: occurrence.sessionId,
+      })
+    : undefined
 
   const blueprintItems = useMemo(
     () =>
@@ -65,29 +93,43 @@ export const OccurrenceDetails = ({
         ? occurrence.detections
             .map((id) => occurrence.getDetectionInfo(id))
             .filter(
-              (item): item is BlueprintItem & { captureId: string } => !!item
+              (
+                item
+              ): item is BlueprintItem & {
+                captureId: string
+                frameLabel: FrameLabel
+              } => !!item
             )
-            .map((item) => ({
-              ...item,
-              to:
-                !occurrence.sessionId ||
-                pathname.includes(
-                  APP_ROUTES.SESSIONS({ projectId: projectId as string })
-                )
-                  ? undefined
-                  : getAppRoute({
-                      to: APP_ROUTES.SESSION_DETAILS({
-                        projectId: projectId as string,
-                        sessionId: occurrence.sessionId,
-                      }),
-                      filters: {
-                        occurrence: occurrence.id,
-                        capture: item.captureId,
-                      },
-                    }),
-            }))
+            .map((item) => {
+              if (!sessionRoute) {
+                return { ...item, to: undefined }
+              }
+
+              // On the session page itself, keep the other selected occurrences and
+              // only move the capture.
+              if (pathname === sessionRoute) {
+                const params = new URLSearchParams(search)
+                if (!params.getAll('occurrence').includes(occurrence.id)) {
+                  params.append('occurrence', occurrence.id)
+                }
+                params.set('capture', item.captureId)
+
+                return { ...item, to: `${sessionRoute}?${params}` }
+              }
+
+              return {
+                ...item,
+                to: getAppRoute({
+                  to: sessionRoute,
+                  filters: {
+                    occurrence: occurrence.id,
+                    capture: item.captureId,
+                  },
+                }),
+              }
+            })
         : [],
-    [occurrence]
+    [occurrence, pathname, search, sessionRoute]
   )
 
   const fields = [
@@ -169,16 +211,18 @@ export const OccurrenceDetails = ({
           ) : null}
           {canUpdate && (
             <>
-              <Agree
-                agreed={userInfo ? occurrence.userAgreed(userInfo.id) : false}
-                agreeWith={{
-                  identificationId: occurrence.determinationIdentificationId,
-                  predictionId: occurrence.determinationPredictionId,
-                }}
-                applied
-                occurrenceId={occurrence.id}
-                taxonId={occurrence.determinationTaxon.id}
-              />
+              {occurrence.determinationTaxon ? (
+                <Agree
+                  agreed={userInfo ? occurrence.userAgreed(userInfo.id) : false}
+                  agreeWith={{
+                    identificationId: occurrence.determinationIdentificationId,
+                    predictionId: occurrence.determinationPredictionId,
+                  }}
+                  applied
+                  occurrenceId={occurrence.id}
+                  taxonId={occurrence.determinationTaxon.id}
+                />
+              ) : null}
               <Button
                 onClick={() => {
                   setSelectedTab(TABS.IDENTIFICATION)
@@ -192,7 +236,11 @@ export const OccurrenceDetails = ({
               </Button>
               <IdQuickActions
                 occurrenceIds={[occurrence.id]}
-                occurrenceTaxa={[occurrence.determinationTaxon]}
+                occurrenceTaxa={
+                  occurrence.determinationTaxon
+                    ? [occurrence.determinationTaxon]
+                    : []
+                }
               />
             </>
           )}
@@ -256,6 +304,17 @@ export const OccurrenceDetails = ({
                       </Box>
                     )}
 
+                    {occurrence.groupingVerifiedAt ? (
+                      <GroupingConfirmation occurrence={occurrence} />
+                    ) : null}
+
+                    {occurrence.groupingSummary ? (
+                      <GroupingSummary
+                        frameNames={occurrence.frameNames}
+                        summary={occurrence.groupingSummary}
+                      />
+                    ) : null}
+
                     {occurrence.humanIdentifications.map((i) => (
                       <HumanIdentification
                         key={i.id}
@@ -292,11 +351,52 @@ export const OccurrenceDetails = ({
         </div>
         <div className={styles.blueprintWrapper}>
           <div className={styles.blueprintContainer}>
+            {(canRestructure || canVerifyGrouping) && (
+              <GroupingActions
+                canRestructure={canRestructure}
+                canVerify={canVerifyGrouping}
+                occurrence={occurrence}
+              />
+            )}
             <BlueprintCollection showLicenseInfo={blueprintItems.length > 0}>
-              {blueprintItems.map((item) => (
-                <BlueprintItem key={item.id} item={item} />
+              {blueprintItems.map((item, index) => (
+                <BlueprintItem
+                  actions={
+                    canRestructure ? (
+                      <FrameMenu
+                        isFirstInTime={index === blueprintItems.length - 1}
+                        isOnlyFrame={blueprintItems.length < 2}
+                        onAction={(action) =>
+                          setPendingFrameAction({
+                            action,
+                            captureId: item.captureId,
+                            detectionId: item.id,
+                            movedBySplit: index + 1,
+                            timeLabel: item.timeLabel,
+                            total: blueprintItems.length,
+                          })
+                        }
+                      />
+                    ) : undefined
+                  }
+                  caption={
+                    <FrameCaption
+                      detectionId={item.id}
+                      label={item.frameLabel}
+                      timeLabel={item.timeLabel}
+                    />
+                  }
+                  key={item.id}
+                  item={item}
+                  onLinkClick={onNavigate}
+                />
               ))}
             </BlueprintCollection>
+            <FrameActionDialogs
+              occurrence={occurrence}
+              onClose={() => setPendingFrameAction(undefined)}
+              pending={pendingFrameAction}
+            />
           </div>
         </div>
       </div>
